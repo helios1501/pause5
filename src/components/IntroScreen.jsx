@@ -21,8 +21,11 @@ export default function IntroScreen({ onStart }) {
         ))}
       </div>
       <button className="pause5-btn pause5-btn-primary" onClick={onStart}>
-        BẮT ĐẦU →
+        TRA GIÁ & BẮT ĐẦU →
       </button>
+      <p className="hint" style={{ marginTop: 12, fontSize: 12 }}>
+        Bước tiếp theo: nhập sản phẩm để so sánh giá, sau đó làm bài tự đánh giá 5 yếu tố P-A-U-S-E.
+      </p>
     </div>
   )
 }
