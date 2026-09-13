@@ -67,7 +67,7 @@ function App() {
         <header className="pause5-header">
           <h1>PAUSE-5</h1>
           <p>
-            Tự kiểm tra quyết định mua hàng — phát triển từ nghiên cứu <em>“forms hoặc app”</em>.
+            Tự kiểm tra quyết định mua hàng — phát triển từ nghiên cứu khoa học cấp trường THPT Long Trường.
           </p>
         </header>
 

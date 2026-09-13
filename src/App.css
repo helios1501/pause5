@@ -147,6 +147,7 @@
 }
 
 .pause5-scale {
+  margin-top: 12px;
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
@@ -154,7 +155,6 @@
 
 .pause5-scale button {
   flex: 1 1 calc(20% - 8px);
-  min-width: 56px;
   padding: 12px 6px;
   border-radius: 10px;
   border: 2px solid var(--border);
