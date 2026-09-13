@@ -13,8 +13,9 @@
 
 const API_KEY = import.meta.env.VITE_PRICES_API_KEY
 
-// Thử theo thứ tự: VN → US → GB. PricesAPI yêu cầu country hợp lệ.
-const COUNTRY_FALLBACK = ['vn', 'us', 'gb']
+// Thứ tự country: VN (market chính) → US (market phụ, data đầy đủ nhất) → AU (Asia-Pacific).
+// Bỏ GB vì PricesAPI gói thường trả 404 cho country này → tốn credit vô ích.
+const COUNTRY_FALLBACK = ['vn', 'us', 'au']
 const DEFAULT_LIMIT = 4 // số sản phẩm trả về / quốc gia
 const DEFAULT_OFFERS_LIMIT = 5 // số offer trong mỗi sản phẩm
 
@@ -65,8 +66,10 @@ function expandProductOffers(product) {
 }
 
 // Gọi PricesAPI thật — thử tuần tự các country cho đến khi có data.
-// Lưu ý: trong dev, gọi qua Vite proxy (/api/pricesapi) để giấu Authorization header
-// và bypass CORS. Khi deploy production, route proxy này cần được handle bởi backend.
+// Endpoint gọi qua route /api/pricesapi/{path}:
+//   - Dev: Vite proxy ở vite.config.js forward + gắn Authorization header server-side
+//   - Prod: Vercel serverless function api/pricesapi/[...path].js forward + gắn header
+// Nhờ vậy key không bao giờ xuất hiện trong browser Network tab.
 async function callRealProvider(query) {
   if (!API_KEY || API_KEY === 'YOUR_KEY_HERE') return null
 
@@ -83,17 +86,22 @@ async function callRealProvider(query) {
         headers: { Accept: 'application/json' },
       })
 
-      // 401/403/429: dừng luôn, đỡ tốn credit
+      // 401/403: dừng luôn, key sai / quota — không tốn thêm credit
       if (res.status === 401 || res.status === 403) {
-        console.warn('[PricesAPI] Auth failed, dừng thử country khác:', res.status)
+        console.warn('[PricesAPI] Auth/quota failed, dừng thử country khác:', res.status)
         return null
       }
 
-      if (!res.ok) throw new Error(`PricesAPI ${country} HTTP ${res.status}`)
+      // 404 / 5xx: country này không có data hoặc PricesAPI lỗi → thử country kế tiếp.
+      // Trước đây throw làm fallback chain dừng, giờ 404 chỉ là "no data" bình thường.
+      if (!res.ok) {
+        console.warn(`[PricesAPI] ${country} HTTP ${res.status} — thử country kế tiếp`)
+        await sleep(150)
+        continue
+      }
 
       const json = await res.json()
       if (!json || json.success === false) {
-        // Country này không có data, thử country tiếp theo
         console.warn(`[PricesAPI] ${country} trả về success=false:`, json?.error)
         await sleep(150)
         continue
