@@ -1,85 +1,74 @@
-// Vercel serverless function: forward mọi request /api/pricesapi/* sang PricesAPI
-// và tự đính kèm Authorization header từ env VITE_PRICES_API_KEY (hoặc PRICES_API_KEY).
-//
-// Cú pháp file [...path].js bắt mọi path con, ví dụ:
-//   GET /api/pricesapi/api/v1/products/search?q=...  →  pricesapi.io/api/v1/products/search?q=...
-//
-// Lý do cần proxy:
-//   1. Giấu Authorization key khỏi browser (Network tab, referer leak...)
-//   2. Bypass CORS — PricesAPI không cho browser gọi trực tiếp
-//   3. Cho phép gộp logic retry / fallback country tùy ý ở server-side
-
-const UPSTREAM = 'https://api.pricesapi.io'
-const KEY_ENV_NAMES = ['VITE_PRICES_API_KEY', 'PRICES_API_KEY']
-
-function getApiKey() {
-  for (const name of KEY_ENV_NAMES) {
-    const v = process.env[name]
-    if (v && v !== 'YOUR_KEY_HERE') return v
-  }
-  return null
-}
-
 export default async function handler(req, res) {
-  const apiKey = getApiKey()
-  if (!apiKey) {
-    res.status(500).json({
-      success: false,
-      error: {
-        code: 'MISSING_API_KEY',
-        message:
-          'Server thiếu VITE_PRICES_API_KEY. Thêm vào Vercel env hoặc .env rồi redeploy.',
-      },
-    })
-    return
-  }
+  const apiKey = process.env.PRICES_API_KEY
 
-  // req.url chứa "/api/v1/products/search?q=..." (Vercel đã strip prefix /api/pricesapi)
-  const targetUrl = `${UPSTREAM}${req.url}`
+  if (!apiKey) {
+    return res.status(500).json({
+      success: false,
+      error: 'PRICES_API_KEY is missing on Vercel',
+    })
+  }
 
   try {
-    // Chỉ forward các method an toàn (GET/HEAD); block POST/PUT... để tránh lạm dụng
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.status(405).json({ success: false, error: { message: 'Method not allowed' } })
-      return
+    const path = Array.isArray(req.query.path)
+      ? req.query.path.join('/')
+      : req.query.path
+
+    if (!path) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing API path',
+      })
     }
 
-    // Forward một số header hữu ích từ client lên upstream
-    const forwardHeaders = {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: 'application/json',
-      'User-Agent': 'Pause5/1.0 (vercel-proxy)',
-    }
-    if (req.headers['accept-language']) {
-      forwardHeaders['Accept-Language'] = req.headers['accept-language']
+    const params = new URLSearchParams()
+
+    for (const [key, value] of Object.entries(req.query)) {
+      if (key === 'path') continue
+
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          params.append(key, item)
+        }
+      } else if (value !== undefined) {
+        params.append(key, value)
+      }
     }
 
-    const upstream = await fetch(targetUrl, {
-      method: req.method,
-      headers: forwardHeaders,
-      // Body chỉ áp dụng cho POST/PUT; ở đây chỉ GET nên bỏ qua
+    const targetUrl =
+      `https://api.pricesapi.io/${path}?${params.toString()}`
+
+    console.log('[PricesAPI] Calling:', targetUrl)
+
+    const response = await fetch(targetUrl, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+      },
     })
 
-    // Forward status + body + một số header về client
-    res.status(upstream.status)
+    const body = await response.text()
 
-    const contentType = upstream.headers.get('content-type') || 'application/json'
-    res.setHeader('Content-Type', contentType)
+    console.log(
+      '[PricesAPI] Response:',
+      response.status
+    )
 
-    // Cache public 60s để giảm credit, stale-while-revalidate 5 phút
-    res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=300')
+    res.status(response.status)
 
-    const body = await upstream.text()
-    res.send(body)
-  } catch (err) {
-    console.error('[pricesapi proxy] error:', err)
-    res.status(502).json({
+    const contentType =
+      response.headers.get('content-type')
+
+    if (contentType) {
+      res.setHeader('Content-Type', contentType)
+    }
+
+    return res.send(body)
+  } catch (error) {
+    console.error('[PricesAPI] Proxy error:', error)
+
+    return res.status(500).json({
       success: false,
-      error: {
-        code: 'UPSTREAM_UNREACHABLE',
-        message: 'Không kết nối được PricesAPI.',
-        details: err?.message || String(err),
-      },
+      error: error?.message || 'Proxy request failed',
     })
   }
 }
