@@ -1,79 +1,122 @@
-// Service tích hợp PricesAPI (https://pricesapi.io/) để so sánh giá sản phẩm.
-// Lưu ý quan trọng: PricesAPI là API trả phí theo credits — key của bạn trong .env
-// là dạng `pricesapi_xxx` và PHẢI được truyền qua header Authorization.
-//
-// Vì gọi trực tiếp từ browser sẽ lộ key (F12 là thấy), đây chỉ phù hợp cho dev/demo.
-// Khi đưa lên production, hãy gọi qua backend proxy giấu key.
-// Endpoint: GET https://api.pricesapi.io/api/v1/products/search
-//            params: q (tên sản phẩm), country (us/vn/gb/...), limit, offers_limit
-//            header: Authorization: Bearer <KEY>
-// Response:  { success, data: { products: [...] }, meta }
-//
-// Khi không có key, không có mạng, hoặc lỗi bất kỳ, fallback sang mock data để flow vẫn chạy.
-
-const API_KEY = import.meta.env.VITE_PRICES_API_KEY
-
-// Thứ tự country: VN (market chính) → US (market phụ, data đầy đủ nhất) → AU (Asia-Pacific).
-// Bỏ GB vì PricesAPI gói thường trả 404 cho country này → tốn credit vô ích.
 const COUNTRY_FALLBACK = ['vn', 'us', 'au']
-const DEFAULT_LIMIT = 4 // số sản phẩm trả về / quốc gia
-const DEFAULT_OFFERS_LIMIT = 5 // số offer trong mỗi sản phẩm
+
+const DEFAULT_LIMIT = 4
+const DEFAULT_OFFERS_LIMIT = 5
+const REQUEST_TIMEOUT = 95_000
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-// Chuẩn hoá 1 product (kèm các offer của nó) thành danh sách phẳng các "lời chào giá".
-// Một sản phẩm có thể có nhiều offer (seller khác nhau, giá khác nhau).
-//   { source, title, price, currency, url, rating, seller, condition, stock }
+/**
+ * Chuẩn hóa một product thành danh sách các offer.
+ *
+ * @param {Object} product
+ * @returns {Array}
+ */
 function expandProductOffers(product) {
   const out = []
-  const baseTitle = product.title || 'Sản phẩm'
-  const baseRating = product.rating ?? null
-  const baseUrl = product.url || null
 
-  const offers = Array.isArray(product.offers) ? product.offers : []
+  const baseTitle = product?.title || 'Sản phẩm'
+  const baseRating = product?.rating ?? null
+  const baseUrl = product?.url || null
+
+  const offers = Array.isArray(product?.offers)
+    ? product.offers
+    : []
+
+  // Không có offer riêng -> sử dụng thông tin product.
   if (offers.length === 0) {
-    // Không có offer riêng → dùng luôn thông tin sản phẩm làm 1 dòng
-    out.push({
-      source: (product.source || 'unknown').toLowerCase(),
-      title: baseTitle,
-      price: Number(product.price || 0),
-      currency: product.currency || 'USD',
-      url: baseUrl,
-      rating: baseRating,
-      seller: product.source || 'Unknown',
-      condition: product.condition || 'new',
-      stock: null,
-    })
+    const price = Number(product?.price ?? 0)
+
+    if (price > 0) {
+      out.push({
+        source: String(product?.source || 'unknown').toLowerCase(),
+        title: baseTitle,
+        price,
+        currency: product?.currency || 'USD',
+        url: baseUrl || '#',
+        rating: baseRating,
+        seller: product?.source || 'Unknown',
+        condition: product?.condition || 'new',
+        stock: product?.stock_status || null,
+      })
+    }
+
     return out
   }
 
   for (const offer of offers) {
+    const price = Number(
+      offer?.price ??
+      product?.price ??
+      0
+    )
+
+    if (price <= 0) continue
+
     out.push({
-      source: (offer.seller || product.source || 'unknown').toLowerCase(),
-      title: offer.product_title || baseTitle,
-      price: Number(offer.price ?? product.price ?? 0),
-      currency: offer.currency || product.currency || 'USD',
-      url: offer.url || offer.seller_url || baseUrl || '#',
+      source: String(
+        offer?.seller ||
+        product?.source ||
+        'unknown'
+      ).toLowerCase(),
+
+      title:
+        offer?.product_title ||
+        baseTitle,
+
+      price,
+
+      currency:
+        offer?.currency ||
+        product?.currency ||
+        'USD',
+
+      url:
+        offer?.url ||
+        offer?.seller_url ||
+        baseUrl ||
+        '#',
+
       rating: baseRating,
-      seller: offer.seller || product.source || 'Unknown',
-      condition: offer.condition || product.condition || 'new',
-      stock: offer.stock_status || null,
+
+      seller:
+        offer?.seller ||
+        product?.source ||
+        'Unknown',
+
+      condition:
+        offer?.condition ||
+        product?.condition ||
+        'new',
+
+      stock:
+        offer?.stock_status ||
+        null,
     })
   }
+
   return out
 }
 
-// Gọi PricesAPI thật — thử tuần tự các country cho đến khi có data.
-// Endpoint gọi qua route /api/pricesapi/{path}:
-//   - Dev: Vite proxy ở vite.config.js forward + gắn Authorization header server-side
-//   - Prod: Vercel serverless function api/pricesapi/[...path].js forward + gắn header
-// Nhờ vậy key không bao giờ xuất hiện trong browser Network tab.
+/**
+ * Gọi PricesAPI thông qua backend proxy.
+ *
+ * Thử lần lượt:
+ * VN -> US -> AU
+ *
+ * @param {string} query
+ * @returns {Promise<{offers: Array, country: string} | null>}
+ */
 async function callRealProvider(query) {
-  if (!API_KEY || API_KEY === 'YOUR_KEY_HERE') return null
-
   for (const country of COUNTRY_FALLBACK) {
+    const controller = new AbortController()
+
+    const timeout = setTimeout(() => {
+      controller.abort()
+    }, REQUEST_TIMEOUT)
+
     try {
       const params = new URLSearchParams({
         q: query,
@@ -81,55 +124,112 @@ async function callRealProvider(query) {
         limit: String(DEFAULT_LIMIT),
         offers_limit: String(DEFAULT_OFFERS_LIMIT),
       })
-      const url = `/api/pricesapi/api/v1/products/search?${params.toString()}`
-      const res = await fetch(url, {
-        headers: { Accept: 'application/json' },
+
+      // Gọi qua backend/proxy để không làm lộ API key.
+      const endpoint =
+        `/api/pricesapi/api/v1/products/search?${params.toString()}`
+
+      const res = await fetch(endpoint, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+        },
       })
 
-      // 401/403: dừng luôn, key sai / quota — không tốn thêm credit
+      // Sai key / hết quota.
+      // Không tiếp tục country khác để tránh request không cần thiết.
       if (res.status === 401 || res.status === 403) {
-        console.warn('[PricesAPI] Auth/quota failed, dừng thử country khác:', res.status)
+        console.warn(
+          `[PricesAPI] Authentication/quota failed: HTTP ${res.status}`
+        )
+
         return null
       }
 
-      // 404 / 5xx: country này không có data hoặc PricesAPI lỗi → thử country kế tiếp.
-      // Trước đây throw làm fallback chain dừng, giờ 404 chỉ là "no data" bình thường.
+      // Country không có data hoặc server lỗi.
       if (!res.ok) {
-        console.warn(`[PricesAPI] ${country} HTTP ${res.status} — thử country kế tiếp`)
+        console.warn(
+          `[PricesAPI] ${country}: HTTP ${res.status} - thử country tiếp theo`
+        )
+
         await sleep(150)
         continue
       }
 
       const json = await res.json()
+
       if (!json || json.success === false) {
-        console.warn(`[PricesAPI] ${country} trả về success=false:`, json?.error)
+        console.warn(
+          `[PricesAPI] ${country}: success=false`,
+          json?.error || ''
+        )
+
         await sleep(150)
         continue
       }
 
-      const products = json?.data?.products || []
-      if (!products.length) {
+      const products = Array.isArray(json?.data?.products)
+        ? json.data.products
+        : []
+
+      if (products.length === 0) {
+        console.info(
+          `[PricesAPI] ${country}: không tìm thấy sản phẩm`
+        )
+
         await sleep(150)
         continue
       }
 
-      const flat = products.flatMap(expandProductOffers).filter((r) => r.price > 0)
-      if (flat.length) {
-        console.info(`[PricesAPI] ${country} trả về ${flat.length} offers từ ${products.length} sản phẩm`)
-        return { offers: flat, country }
+      const flat = products
+        .flatMap(expandProductOffers)
+        .filter((item) => Number(item.price) > 0)
+
+      if (flat.length > 0) {
+        console.info(
+          `[PricesAPI] ${country}: ${flat.length} offers từ ${products.length} sản phẩm`
+        )
+
+        return {
+          offers: flat,
+          country,
+        }
       }
-    } catch (err) {
-      console.warn(`[PricesAPI] ${country} failed:`, err.message)
+
       await sleep(150)
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        console.warn(
+          `[PricesAPI] ${country}: request timeout`
+        )
+      } else {
+        console.warn(
+          `[PricesAPI] ${country} failed:`,
+          err?.message || err
+        )
+      }
+
+      await sleep(150)
+    } finally {
+      clearTimeout(timeout)
     }
   }
+
   return null
 }
 
-// Mock data dùng khi không có key hoặc API lỗi — giúp demo flow đầy đủ.
+/**
+ * Mock data dùng khi API không hoạt động.
+ *
+ * @param {string} query
+ * @returns {Array}
+ */
 function buildMockResults(query) {
   const q = (query || 'sản phẩm').trim()
-  const base = (q.length || 1) * 250_000
+
+  const base = Math.max(q.length, 1) * 250_000
+
   return [
     {
       source: 'shopee',
@@ -142,20 +242,22 @@ function buildMockResults(query) {
       condition: 'new',
       stock: 'in_stock',
     },
+
     {
       source: 'lazada',
       title: `${q} - chính hãng`,
       price: Math.round(base * 1.05),
       currency: 'VND',
-      url: 'https://lazada.vn/',
+      url: 'https://www.lazada.vn/',
       rating: 4.3,
       seller: 'LazMall',
       condition: 'new',
       stock: 'in_stock',
     },
+
     {
       source: 'tiki',
-      title: `${q}`,
+      title: q,
       price: Math.round(base * 0.98),
       currency: 'VND',
       url: 'https://tiki.vn/',
@@ -164,12 +266,13 @@ function buildMockResults(query) {
       condition: 'new',
       stock: 'in_stock',
     },
+
     {
       source: 'amazon',
       title: `${q} (global)`,
       price: Math.round(base * 1.18),
       currency: 'VND',
-      url: 'https://amazon.com/',
+      url: 'https://www.amazon.com/',
       rating: 4.5,
       seller: 'Amazon Global',
       condition: 'new',
@@ -179,15 +282,28 @@ function buildMockResults(query) {
 }
 
 /**
- * Tìm kiếm & so sánh giá một sản phẩm.
- * @param {string} query - tên sản phẩm hoặc URL sản phẩm
- * @returns {Promise<{query, results, best, average, lowest, highest, currency, isMock, country}>}
+ * Tìm kiếm và so sánh giá sản phẩm.
+ *
+ * @param {string} query Tên hoặc URL sản phẩm.
+ *
+ * @returns {Promise<{
+ *   query: string,
+ *   results: Array,
+ *   best: Object|null,
+ *   average: number,
+ *   lowest: number,
+ *   highest: number,
+ *   currency: string,
+ *   isMock: boolean,
+ *   country: string|null
+ * }>}
  */
 export async function searchPrices(query) {
   const trimmed = (query || '').trim()
+
   if (!trimmed) {
     return {
-      query: trimmed,
+      query: '',
       results: [],
       best: null,
       average: 0,
@@ -199,29 +315,69 @@ export async function searchPrices(query) {
     }
   }
 
-  let providerResult = await callRealProvider(trimmed)
-  let results = providerResult?.offers
-  let isMock = false
-  let country = providerResult?.country || null
-  if (!results) {
+  const providerResult = await callRealProvider(trimmed)
+
+  let results
+  let isMock
+  let country
+
+  if (
+    providerResult?.offers &&
+    providerResult.offers.length > 0
+  ) {
+    results = providerResult.offers
+    isMock = false
+    country = providerResult.country
+  } else {
     results = buildMockResults(trimmed)
     isMock = true
+    country = null
   }
 
-  const priced = results.filter((r) => r.price > 0)
-  // Sort tăng dần theo giá để UI hiển thị từ rẻ → đắt.
-  // Ổn định thêm tie-breaker theo tên nguồn để thứ tự không nhảy lung tung
-  // giữa các lần refresh cùng một query.
-  priced.sort((a, b) => a.price - b.price || String(a.source).localeCompare(String(b.source)))
-  const prices = priced.map((r) => r.price)
-  const currency = priced[0]?.currency || 'VND'
+  const priced = results
+    .filter((item) => Number(item.price) > 0)
+    .sort(
+      (a, b) =>
+        Number(a.price) - Number(b.price) ||
+        String(a.source).localeCompare(String(b.source))
+    )
 
-  const lowest = prices.length ? Math.min(...prices) : 0
-  const highest = prices.length ? Math.max(...prices) : 0
-  const average = prices.length
-    ? Math.round(prices.reduce((s, p) => s + p, 0) / prices.length)
-    : 0
-  const best = priced.find((r) => r.price === lowest) || null
+  if (priced.length === 0) {
+    return {
+      query: trimmed,
+      results: [],
+      best: null,
+      average: 0,
+      lowest: 0,
+      highest: 0,
+      currency: 'VND',
+      isMock,
+      country,
+    }
+  }
+
+  const prices = priced.map((item) =>
+    Number(item.price)
+  )
+
+  const currency =
+    priced[0]?.currency ||
+    'VND'
+
+  const lowest = Math.min(...prices)
+  const highest = Math.max(...prices)
+
+  const average = Math.round(
+    prices.reduce(
+      (sum, price) => sum + price,
+      0
+    ) / prices.length
+  )
+
+  const best =
+    priced.find(
+      (item) => Number(item.price) === lowest
+    ) || null
 
   return {
     query: trimmed,
@@ -237,13 +393,34 @@ export async function searchPrices(query) {
 }
 
 /**
- * Đánh giá mức giá so với trung bình thị trường.
- * @returns {'cheap' | 'fair' | 'expensive' | 'unknown'}
+ * Đánh giá giá sản phẩm so với giá trung bình thị trường.
+ *
+ * @param {number} price
+ * @param {number} average
+ *
+ * @returns {'cheap'|'fair'|'expensive'|'unknown'}
  */
 export function evaluatePriceVsMarket(price, average) {
-  if (!price || !average) return 'unknown'
-  const ratio = price / average
-  if (ratio <= 0.9) return 'cheap'
-  if (ratio <= 1.1) return 'fair'
+  const currentPrice = Number(price)
+  const marketAverage = Number(average)
+
+  if (
+    currentPrice <= 0 ||
+    marketAverage <= 0
+  ) {
+    return 'unknown'
+  }
+
+  const ratio =
+    currentPrice / marketAverage
+
+  if (ratio <= 0.9) {
+    return 'cheap'
+  }
+
+  if (ratio <= 1.1) {
+    return 'fair'
+  }
+
   return 'expensive'
 }
