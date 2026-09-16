@@ -127,7 +127,7 @@ async function callRealProvider(query) {
 
       // Gọi qua backend/proxy để không làm lộ API key.
       const endpoint =
-        `/api/pricesapi/api/v1/products/search?${params.toString()}`
+        `/api/pricesapi?${params.toString()}`
 
       const res = await fetch(endpoint, {
         method: 'GET',
