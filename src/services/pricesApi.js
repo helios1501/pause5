@@ -125,15 +125,17 @@ async function callRealProvider(query) {
         offers_limit: String(DEFAULT_OFFERS_LIMIT),
       })
 
-      // Gọi qua backend/proxy để không làm lộ API key.
+      const API_KEY = import.meta.env.VITE_PRICES_API_KEY || import.meta.env.PRICES_API_KEY
+
       const endpoint =
-        `/api/pricesapi/api/v1/products/search?${params.toString()}`
+        `https://api.pricesapi.io/api/v1/products/search?${params.toString()}`
 
       const res = await fetch(endpoint, {
         method: 'GET',
         signal: controller.signal,
         headers: {
           Accept: 'application/json',
+          Authorization: `Bearer ${API_KEY}`,
         },
       })
 
