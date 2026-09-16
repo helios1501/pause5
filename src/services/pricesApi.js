@@ -232,7 +232,7 @@ function buildMockResults(query) {
 
   return [
     {
-      source: 'shopee',
+      source: 'shopeeMock',
       title: `${q} - phiên bản tiêu chuẩn`,
       price: Math.round(base * 0.92),
       currency: 'VND',
